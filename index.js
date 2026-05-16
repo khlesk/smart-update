@@ -347,8 +347,20 @@ function parseChanges(beforeData, afterData) {
 // ─────────────────────────────────────────────────────────
 // Command execution
 // ─────────────────────────────────────────────────────────
+function wrapWindows(command, args) {
+  if (process.platform !== "win32") return { command, args };
+  return { command: "cmd", args: ["/c", command, ...args] };
+}
+
+function runSpawn(command, args, options) {
+  const { command: cmd, args: cmdArgs } = wrapWindows(command, args);
+  return spawnSync(cmd, cmdArgs, options);
+}
+
 function needCmd(command) {
-  const result = spawnSync(command, ["--version"], {
+  const { command: cmd, args } = wrapWindows(command, ["--version"]);
+
+  const result = spawnSync(cmd, args, {
     stdio: "ignore",
   });
   if (result.status !== 0) {
@@ -357,7 +369,9 @@ function needCmd(command) {
 }
 
 function getNpmVersion() {
-  const result = spawnSync("npm", ["--version"], {
+  const { command: cmd, args } = wrapWindows("npm", ["--version"]);
+
+  const result = spawnSync(cmd, args, {
     encoding: "utf8",
   });
   if (result.status !== 0 || result.error) {
@@ -383,7 +397,8 @@ function isNpmVersionAtLeast(targetVersion) {
 }
 
 function runCommand(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const { command: cmd, args: cmdArgs } = wrapWindows(command, args);
+  const result = spawnSync(cmd, cmdArgs, {
     encoding: "utf8",
     stdio: options.capture ? ["inherit", "pipe", "pipe"] : "inherit",
     cwd: options.cwd,
@@ -588,7 +603,12 @@ async function selectPackages(
 // npm config helpers
 // ─────────────────────────────────────────────────────────
 function getNpmGlobalConfigPath() {
-  const result = spawnSync("npm", ["config", "get", "globalconfig"], {
+  const { command, args } = wrapWindows("npm", [
+    "config",
+    "get",
+    "globalconfig",
+  ]);
+  const result = spawnSync(command, args, {
     encoding: "utf8",
     stdio: ["pipe", "pipe", "ignore"],
   });
@@ -600,7 +620,8 @@ function getNpmGlobalConfigPath() {
 }
 
 function getNpmUserConfigPath() {
-  const result = spawnSync("npm", ["config", "get", "userconfig"], {
+  const { command, args } = wrapWindows("npm", ["config", "get", "userconfig"]);
+  const result = spawnSync(command, args, {
     encoding: "utf8",
     stdio: ["pipe", "pipe", "ignore"],
   });
@@ -657,7 +678,8 @@ function setNpmConfig(key, value, globalMode = false) {
   const args = globalMode
     ? ["config", "set", "-g", key, String(value)]
     : ["config", "set", key, String(value)];
-  const result = spawnSync("npm", args, {
+  const { command, args: cmdArgs } = wrapWindows("npm", args);
+  const result = spawnSync(command, cmdArgs, {
     encoding: "utf8",
     stdio: "inherit",
   });

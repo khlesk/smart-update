@@ -1,5 +1,7 @@
 # smart-update
 
+<img src="assets/screen.png" alt="Screenshot" width="934">
+
 Interactive CLI tool to update npm dependencies with version comparison and selective updates.
 
 ## Features

@@ -1,6 +1,6 @@
 {
   "name": "@khlesk/smart-update",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Interactive CLI tool to update npm dependencies with version comparison and selective updates",
   "main": "index.js",
   "bin": {

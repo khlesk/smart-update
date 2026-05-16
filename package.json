@@ -4,7 +4,7 @@
   "description": "Interactive CLI tool to update npm dependencies with version comparison and selective updates",
   "main": "index.js",
   "bin": {
-    "smart-update": "./index.js"
+    "smart-update": "index.js"
   },
   "files": [
     "index.js",

@@ -55,6 +55,15 @@ smart-update -v         # Show version
 
 If `min-release-age` is not configured, `smart-update` will offer to set it up for you in npm's global config so it is shared across projects. Use `--bypass-age` to skip the check for a single run.
 
+## Install scripts
+
+If npm blocks dependency install scripts, `smart-update` lists the affected packages
+and asks which ones you trust. It keeps all scripts blocked by default.
+
+For local projects, `smart-update` saves version-pinned approvals in the root
+`package.json` and rebuilds the packages. For global updates, approvals apply once
+and are not saved.
+
 ## License
 
 MIT

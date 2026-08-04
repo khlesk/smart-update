@@ -1,6 +1,6 @@
 {
   "name": "@khlesk/smart-update",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Interactive CLI tool to update npm dependencies with version comparison and selective updates",
   "main": "index.js",
   "bin": {
@@ -15,7 +15,7 @@
     "start": "node index.js",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "keywords": [
     "npm",

@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const readline = require("readline/promises");
 const { spawnSync } = require("child_process");
+const VERSION = require("./package.json").version;
 
 // ─────────────────────────────────────────────────────────
 // ANSI Color Palette
@@ -63,7 +64,14 @@ const LAYOUT = {
 // ─────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────
-const stripAnsi = (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "");
+// npm can include color and cursor-control sequences when its output is
+// captured on Windows (notably when launched from MSYS2).  Remove the whole
+// escape sequence rather than just SGR color codes so parsing and table-width
+// calculations see the same text a user sees in a terminal.
+const stripAnsi = (text) =>
+  String(text)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "") // OSC sequences
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ""); // CSI sequences
 const padRight = (text, width) => {
   const visible = stripAnsi(text).length;
   const padding = Math.max(0, width - visible);
@@ -212,7 +220,7 @@ function usage() {
   const widths = getColumnWidths(["Command", "Description"], rows);
 
   blank();
-  writeHeaderLine(`${C.bold}${C.header}NPM Package Updater — Usage${C.reset}`);
+  writeHeaderLine(`${C.bold}${C.header}NPM Smart Update — Usage${C.reset}`);
   blank();
 
   for (const [command, description] of rows) {
@@ -344,6 +352,17 @@ function parseChanges(beforeData, afterData) {
     ]);
 }
 
+function parseInstallScripts(afterData, packageNames, blockedInfo) {
+  const after = afterData.dependencies || {};
+  const infoMap = new Map(blockedInfo || []);
+  return [...packageNames]
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => [
+      name,
+      after[name]?.version || infoMap.get(name) || "(unknown)",
+    ]);
+}
+
 // ─────────────────────────────────────────────────────────
 // Command execution
 // ─────────────────────────────────────────────────────────
@@ -402,11 +421,84 @@ function runCommand(command, args, options = {}) {
     encoding: "utf8",
     stdio: options.capture ? ["inherit", "pipe", "pipe"] : "inherit",
     cwd: options.cwd,
+    env: options.forceColor
+      ? { ...process.env, npm_config_color: "always" }
+      : undefined,
   });
   if (result.error) fail(`Failed to run: ${C.bold}${command}${C.reset}`);
   if (!options.allowFailure && result.status !== 0)
     process.exit(result.status || 1);
   return result;
+}
+
+function writeCommandOutput(result) {
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+}
+
+function getBlockedInstallScriptPackages(result) {
+  const output = stripAnsi(
+    `${result.stdout || ""}\n${result.stderr || ""}`
+  ).replace(/\r/g, "");
+  const packages = [];
+  const seen = new Set();
+
+  for (const line of output.split("\n")) {
+    const match = line.match(
+      /\bnpm\s+warn\s+(?:install-scripts|allow-scripts)\s+(.+?)@([^@\s]+)\s+\(/i
+    );
+    if (!match) continue;
+    const name = match[1];
+    const version = match[2];
+    if (seen.has(name)) continue;
+    seen.add(name);
+    packages.push([name, version]);
+  }
+
+  return packages;
+}
+
+function getInstallScriptApprovalChoices(currentMode) {
+  const choices = [{ name: "Keep scripts blocked", value: "skip" }];
+
+  if (currentMode === "global") {
+    choices.push({
+      name: "Select packages to allow once and reinstall",
+      value: "approve",
+    });
+  } else {
+    choices.push({
+      name: "Approve in this project and rebuild affected packages",
+      value: "approve",
+    });
+  }
+
+  return choices;
+}
+
+function getInstallScriptApprovalCommands(
+  currentMode,
+  selectedPackages,
+  packagesToAllow,
+  npmCommandFlags,
+  extraArgs
+) {
+  if (currentMode === "local") {
+    return [
+      ["install-scripts", "approve", ...packagesToAllow],
+      ["rebuild", ...packagesToAllow],
+    ];
+  }
+
+  return [
+    [
+      "install",
+      ...npmCommandFlags,
+      ...extraArgs,
+      `--allow-scripts=${packagesToAllow.join(",")}`,
+      ...selectedPackages,
+    ],
+  ];
 }
 
 function writeCommandJson(file, command, args, options = {}) {
@@ -508,6 +600,36 @@ function printChanges(beforeFile, afterFile, title) {
         (padded) => `${C.pkgName}${padded}${C.reset}`,
         (padded) => `${C.danger}${padded}${C.reset}`,
         (padded) => `${C.success}${padded}${C.reset}`,
+      ])
+    );
+  }
+  blank();
+}
+
+function printInstallScripts(afterFile, packageNames, blockedInfo, title) {
+  const rows = parseInstallScripts(
+    readJson(afterFile),
+    packageNames,
+    blockedInfo
+  );
+  blank();
+  log(`${C.bold}${C.header}${title}${C.reset}`);
+
+  if (!rows.length) {
+    log(`${C.muted}No install scripts executed.${C.reset}`);
+    return;
+  }
+
+  const headers = ["Package", "Version"];
+  const widths = getColumnWidths(headers, rows, [30, 22]);
+
+  log(`${C.bold}${renderRow(headers, widths)}${C.reset}`);
+
+  for (const [name, version] of rows) {
+    log(
+      renderRow([name, version], widths, [
+        (padded) => `${C.pkgName}${padded}${C.reset}`,
+        (padded) => `${C.version}${padded}${C.reset}`,
       ])
     );
   }
@@ -718,13 +840,15 @@ function getModeConfig(currentMode) {
 // ─────────────────────────────────────────────────────────
 // Core operation
 // ─────────────────────────────────────────────────────────
-function runPackageCommand(
+async function runPackageCommand(
   command,
   selectedPackages,
   npmCommandFlags,
   beforeJson,
   afterJson,
-  listArgs
+  listArgs,
+  inquirer,
+  currentMode
 ) {
   const flagText = npmCommandFlags.length
     ? ` ${npmCommandFlags.join(" ")}`
@@ -744,12 +868,88 @@ function runPackageCommand(
   );
   blank();
 
-  runCommand("npm", [
+  const commandArgs = [
     command,
     ...npmCommandFlags,
     ...extraArgs,
     ...selectedPackages,
-  ]);
+  ];
+  let result = runCommand("npm", commandArgs, {
+    capture: true,
+    allowFailure: true,
+    forceColor: true,
+  });
+  writeCommandOutput(result);
+
+  if (result.status !== 0) process.exit(result.status || 1);
+
+  const blockedPackages =
+    command === "update" ? getBlockedInstallScriptPackages(result) : [];
+  let executedInstallScripts = [];
+
+  if (blockedPackages.length > 0) {
+    blank();
+    logWarn(
+      `${blockedPackages.length} package(s) had install scripts blocked by npm.`
+    );
+    logDetail(
+      `${C.dim}Only allow install scripts from packages you trust.${C.reset}`
+    );
+    blank();
+
+    const { allowAction } = await inquirer.prompt([
+      {
+        type: "select",
+        name: "allowAction",
+        message: "How should npm handle these install scripts?",
+        default: "skip",
+        choices: getInstallScriptApprovalChoices(currentMode),
+      },
+    ]);
+
+    if (allowAction !== "skip") {
+      const { packagesToAllow } = await inquirer.prompt([
+        {
+          type: "checkbox",
+          name: "packagesToAllow",
+          message: "Select packages whose install scripts you trust",
+          choices: blockedPackages.map(([packageName]) => ({
+            name: packageName,
+            value: packageName,
+            checked: false,
+          })),
+          pageSize: 12,
+        },
+      ]);
+
+      if (!packagesToAllow.length) {
+        logInfo("No install scripts selected — keeping all scripts blocked.");
+      } else {
+        const approvalCommands = getInstallScriptApprovalCommands(
+          currentMode,
+          selectedPackages,
+          packagesToAllow,
+          npmCommandFlags,
+          extraArgs
+        );
+
+        for (const approvalArgs of approvalCommands) {
+          blank();
+          log(`${C.dim}$ npm ${approvalArgs.join(" ")}${C.reset}`);
+          blank();
+          result = runCommand("npm", approvalArgs, {
+            capture: true,
+            allowFailure: true,
+            forceColor: true,
+          });
+          writeCommandOutput(result);
+          if (result.status !== 0) process.exit(result.status || 1);
+        }
+        executedInstallScripts = packagesToAllow;
+      }
+    }
+  }
+
   writeCommandJson(afterJson, "npm", listArgs);
 
   printChanges(
@@ -757,6 +957,15 @@ function runPackageCommand(
     afterJson,
     command === "uninstall" ? "Removed packages" : "Updated packages"
   );
+
+  if (executedInstallScripts.length > 0) {
+    printInstallScripts(
+      afterJson,
+      executedInstallScripts,
+      blockedPackages,
+      "Install scripts executed"
+    );
+  }
 
   logSuccess("Operation completed successfully.");
 }
@@ -799,7 +1008,9 @@ async function main() {
 
   // ── Header ──
   blank();
-  writeHeaderLine(`${C.bold}${C.header}NPM Package Updater${C.reset}`);
+  writeHeaderLine(
+    `${C.bold}${C.header}NPM Smart Update ${VERSION}${C.reset}`
+  );
   headerRow(
     "Mode:",
     mode === "local"
@@ -952,47 +1163,58 @@ async function main() {
     process.exit(0);
   }
 
-  runPackageCommand(
+  await runPackageCommand(
     command,
     selectedPackages,
     modeConfig.npmFlags,
     beforeJson,
     afterJson,
-    modeConfig.listArgs
+    modeConfig.listArgs,
+    inquirer,
+    mode
   );
 }
 
 // ─────────────────────────────────────────────────────────
 // Bootstrap
 // ─────────────────────────────────────────────────────────
-for (const arg of process.argv.slice(2)) {
-  switch (arg) {
-    case "-g":
-    case "--global":
-      mode = "global";
-      break;
-    case "--local":
-      mode = "local";
-      break;
-    case "-b":
-    case "--bypass-age":
-      bypassMinReleaseAge = true;
-      break;
-    case "-v":
-    case "--version":
-      log(require("./package.json").version);
-      process.exit(0);
-    case "-h":
-    case "--help":
-      usage();
-      process.exit(0);
-    default:
-      logError(`Unknown option: ${C.bold}${arg}${C.reset}`);
-      usage();
-      process.exit(1);
+if (require.main === module) {
+  for (const arg of process.argv.slice(2)) {
+    switch (arg) {
+      case "-g":
+      case "--global":
+        mode = "global";
+        break;
+      case "--local":
+        mode = "local";
+        break;
+      case "-b":
+      case "--bypass-age":
+        bypassMinReleaseAge = true;
+        break;
+      case "-v":
+      case "--version":
+        log(VERSION);
+        process.exit(0);
+      case "-h":
+      case "--help":
+        usage();
+        process.exit(0);
+      default:
+        logError(`Unknown option: ${C.bold}${arg}${C.reset}`);
+        usage();
+        process.exit(1);
+    }
   }
+
+  main().catch((error) => {
+    fail(error?.message || error);
+  });
 }
 
-main().catch((error) => {
-  fail(error?.message || error);
-});
+module.exports = {
+  getBlockedInstallScriptPackages,
+  getInstallScriptApprovalCommands,
+  getInstallScriptApprovalChoices,
+  stripAnsi,
+};
